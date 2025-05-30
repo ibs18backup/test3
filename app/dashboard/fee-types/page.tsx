@@ -18,6 +18,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   ChevronUpIcon,
+  RectangleGroupIcon,
 } from '@heroicons/react/24/outline';
 import { useRouter } from 'next/navigation';
 
@@ -31,7 +32,8 @@ type FeeType = Database['public']['Tables']['fee_types']['Row'] & {
 };
 type StudentFeeType = Database['public']['Tables']['student_fee_types']['Row'];
 
-type AssignedStudentFeeTypeRef = Pick<StudentFeeType, 'id' | 'student_id'>;
+// FIX 1: Add 'net_payable_amount' and 'assigned_amount' to AssignedStudentFeeTypeRef
+type AssignedStudentFeeTypeRef = Pick<StudentFeeType, 'id' | 'student_id' | 'discount' | 'discount_description' | 'net_payable_amount' | 'assigned_amount'>;
 
 
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -99,9 +101,21 @@ export default function FeeTypeManagement() {
   const [selectedStudentIdsToAssign, setSelectedStudentIdsToAssign] = useState<string[]>([]);
   const [isAssigningStudents, setIsAssigningStudents] = useState(false);
   const [assignedStudentFeeTypes, setAssignedStudentFeeTypes] = useState<AssignedStudentFeeTypeRef[]>([]);
+  const [studentFeeAdjustments, setStudentFeeAdjustments] = useState<{
+    [studentId: string]: { discount: number; description: string };
+  }>({});
   
   // Filtered list of classes for the Assign Students modal
   const [filteredClassesForAssignStudents, setFilteredClassesForAssignStudents] = useState<Class[]>([]);
+
+  // Map Fee Types to Class Modal States
+  const [showMapFeeTypesToClassModal, setShowMapFeeTypesToClassModal] = useState(false);
+  const [selectedClassForMapping, setSelectedClassForMapping] = useState<string>('');
+  const [feeTypesForClassMapping, setFeeTypesForClassMapping] = useState<string[]>([]); // Fee IDs mapped to the selected class
+  const [isMappingFeesToClass, setIsMappingFeesToClass] = useState(false);
+
+  // Fee Search
+  const [feeSearchTerm, setFeeSearchTerm] = useState('');
 
 
   // Helper to recalculate total_fees for a student (from master-ledger, adapted)
@@ -123,8 +137,8 @@ export default function FeeTypeManagement() {
 
     let calculatedTotal = 0;
     studentFeeTypes?.forEach(sft => {
-      const netPayable = sft.net_payable_amount ??
-                         (sft.assigned_amount ?? sft.fee_type?.default_amount ?? 0) - (sft.discount ?? 0);
+      // FIX 2: Clarify operator precedence with parentheses
+      const netPayable = sft.net_payable_amount ?? ((sft.assigned_amount ?? sft.fee_type?.default_amount ?? 0) - (sft.discount ?? 0));
       calculatedTotal += netPayable;
     });
 
@@ -187,6 +201,7 @@ export default function FeeTypeManagement() {
     setStudentsInSelectedClass([]);
     setSelectedStudentIdsToAssign([]);
     setAssignedStudentFeeTypes([]);
+    setStudentFeeAdjustments({});
     setIsAssigningStudents(false);
     setShowAssignStudentsModal(false);
   };
@@ -268,18 +283,29 @@ export default function FeeTypeManagement() {
       };
 
       const fetchExistingAssignments = async () => {
+        // FIX 1: Select 'net_payable_amount' and 'assigned_amount' from student_fee_types
         const { data, error } = await supabase
           .from('student_fee_types')
-          .select('id, student_id')
+          .select('id, student_id, discount, discount_description, net_payable_amount, assigned_amount')
           .eq('fee_type_id', feeTypeToAssign.id)
           .eq('school_id', schoolId);
 
         if (error) {
           console.error('Failed to fetch existing assignments:', error.message);
           setAssignedStudentFeeTypes([]);
+          setStudentFeeAdjustments({});
         } else {
           setAssignedStudentFeeTypes(data || []);
           setSelectedStudentIdsToAssign(data?.map(sft => sft.student_id) || []);
+
+          const initialAdjustments: typeof studentFeeAdjustments = {};
+          (data || []).forEach(sft => {
+            initialAdjustments[sft.student_id] = {
+              discount: sft.discount || 0,
+              description: sft.discount_description || '',
+            };
+          });
+          setStudentFeeAdjustments(initialAdjustments);
         }
       };
 
@@ -289,8 +315,31 @@ export default function FeeTypeManagement() {
       setStudentsInSelectedClass([]);
       setSelectedStudentIdsToAssign([]);
       setAssignedStudentFeeTypes([]);
+      setStudentFeeAdjustments({});
     }
   }, [showAssignStudentsModal, selectedClassForAssignment, feeTypeToAssign, schoolId, supabase]);
+
+  useEffect(() => {
+    if (showMapFeeTypesToClassModal && selectedClassForMapping && schoolId) {
+      const fetchExistingClassFeeMappings = async () => {
+        const { data, error } = await supabase
+          .from('fee_type_classes')
+          .select('fee_type_id')
+          .eq('class_id', selectedClassForMapping)
+          .eq('school_id', schoolId);
+
+        if (error) {
+          console.error('Failed to fetch existing class-fee mappings:', error.message);
+          setFeeTypesForClassMapping([]);
+        } else {
+          setFeeTypesForClassMapping(data?.map(item => item.fee_type_id) || []);
+        }
+      };
+      fetchExistingClassFeeMappings();
+    } else {
+      setFeeTypesForClassMapping([]);
+    }
+  }, [showMapFeeTypesToClassModal, selectedClassForMapping, schoolId, supabase]);
 
 
   const handleFormInputChange = (
@@ -311,6 +360,20 @@ export default function FeeTypeManagement() {
 
   const handleCheckboxToggle = ( id: string, currentIds: string[], setFunc: React.Dispatch<React.SetStateAction<string[]>> ) => {
     setFunc( currentIds.includes(id) ? currentIds.filter((cid) => cid !== id) : [...currentIds, id] );
+  };
+
+  const handleStudentDiscountChange = (studentId: string, val: string) => {
+    setStudentFeeAdjustments(prev => ({
+      ...prev,
+      [studentId]: { ...(prev[studentId] || { discount: 0, description: '' }), discount: parseFloat(val) || 0 }
+    }));
+  };
+
+  const handleStudentDiscountDescChange = (studentId: string, val: string) => {
+    setStudentFeeAdjustments(prev => ({
+      ...prev,
+      [studentId]: { ...(prev[studentId] || { discount: 0, description: '' }), description: val }
+    }));
   };
 
   const validateFeeForm = ( formToValidate: typeof createFeeForm | typeof editFeeForm ): boolean => {
@@ -413,6 +476,12 @@ export default function FeeTypeManagement() {
     toast.success('Fee type created!');
     fetchFeeTypes();
     resetCreateFeeForm();
+  };
+
+  const openAssignStudentsModal = (feeType: FeeType) => {
+    if (feeType.school_id !== schoolId) { toast.error('Unauthorized action.'); return; }
+    setFeeTypeToAssign(feeType);
+    setShowAssignStudentsModal(true);
   };
 
   const openEditFeeModal = (feeType: FeeType) => {
@@ -557,9 +626,18 @@ export default function FeeTypeManagement() {
 
   // Handle individual student checkbox toggle in Assign Students Modal
   const handleToggleStudentSelection = (studentId: string) => {
-    setSelectedStudentIdsToAssign(prev =>
-      prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId]
-    );
+    setSelectedStudentIdsToAssign(prev => {
+      const newSelection = prev.includes(studentId) ? prev.filter(id => id !== studentId) : [...prev, studentId];
+      if (!newSelection.includes(studentId)) {
+        // If unselecting, remove its discount adjustments
+        setStudentFeeAdjustments(prevAdjustments => {
+          const newAdjustments = { ...prevAdjustments };
+          delete newAdjustments[studentId];
+          return newAdjustments;
+        });
+      }
+      return newSelection;
+    });
   };
 
   const handleAssignStudentsToFee = async () => {
@@ -577,48 +655,68 @@ export default function FeeTypeManagement() {
         // Fetch existing assignments for this fee type and school
         const { data: currentAssignments, error: fetchAssignmentsError } = await supabase
             .from('student_fee_types')
-            .select('id, student_id')
+            .select('id, student_id, assigned_amount, discount, discount_description, net_payable_amount')
             .eq('fee_type_id', feeTypeId)
             .eq('school_id', schoolId);
 
         if (fetchAssignmentsError) throw fetchAssignmentsError;
 
-        const currentAssignedStudentIds = new Set(currentAssignments?.map(a => a.student_id) || []);
+        const currentAssignedStudentMap = new Map(currentAssignments?.map(a => [a.student_id, a]) || []);
         const selectedStudentIdsSet = new Set(selectedStudentIdsToAssign);
 
-        const assignmentsToAdd: Database['public']['Tables']['student_fee_types']['Insert'][] = [];
+        const assignmentsToUpsert: Database['public']['Tables']['student_fee_types']['Insert'][] = [];
         const assignmentsToDeleteIds: number[] = [];
         const studentsToRecalculateFees: Set<string> = new Set();
 
-        // Determine what to add
+        // Process selected students: either insert new or update existing
         selectedStudentIdsSet.forEach(studentId => {
-            if (!currentAssignedStudentIds.has(studentId)) {
-                assignmentsToAdd.push({
+            const currentSft = currentAssignedStudentMap.get(studentId);
+            const discount = studentFeeAdjustments[studentId]?.discount || 0;
+            const discount_description = studentFeeAdjustments[studentId]?.description?.trim() || null;
+            const net_payable = defaultAssignedAmount - discount;
+
+            if (currentSft) {
+                // Student is already assigned, check if update is needed
+                if (currentSft.discount !== discount || currentSft.discount_description !== discount_description || currentSft.net_payable_amount !== net_payable) {
+                    assignmentsToUpsert.push({
+                        id: currentSft.id,
+                        student_id: studentId,
+                        fee_type_id: feeTypeId,
+                        school_id: schoolId,
+                        assigned_amount: currentSft.assigned_amount, // Keep original assigned amount from DB
+                        discount: discount,
+                        discount_description: discount_description,
+                        net_payable_amount: net_payable,
+                    });
+                    studentsToRecalculateFees.add(studentId);
+                }
+            } else {
+                // New assignment
+                assignmentsToUpsert.push({
                     student_id: studentId,
                     fee_type_id: feeTypeId,
                     school_id: schoolId,
                     assigned_amount: defaultAssignedAmount,
-                    discount: 0,
+                    discount: discount,
+                    discount_description: discount_description,
+                    net_payable_amount: net_payable,
                 });
                 studentsToRecalculateFees.add(studentId);
             }
         });
 
-        // Determine what to delete
-        currentAssignedStudentIds.forEach(studentId => {
+        // Process unselected students: delete old assignments
+        currentAssignedStudentMap.forEach((sft, studentId) => {
             if (!selectedStudentIdsSet.has(studentId)) {
-                const assignmentToDelete = currentAssignments?.find(a => a.student_id === studentId);
-                if (assignmentToDelete) {
-                    assignmentsToDeleteIds.push(assignmentToDelete.id);
-                    studentsToRecalculateFees.add(studentId);
-                }
+                assignmentsToDeleteIds.push(sft.id);
+                studentsToRecalculateFees.add(studentId);
             }
         });
 
-        // Perform insertions
-        if (assignmentsToAdd.length > 0) {
-            const { error: insertError } = await supabase.from('student_fee_types').insert(assignmentsToAdd);
-            if (insertError) throw insertError;
+        // Perform upserts
+        if (assignmentsToUpsert.length > 0) {
+            const { error: upsertError } = await supabase.from('student_fee_types').upsert(assignmentsToUpsert);
+            if (upsertError) throw upsertError;
         }
 
         // Perform deletions
@@ -644,6 +742,42 @@ export default function FeeTypeManagement() {
     }
   };
 
+  const handleMapFeeTypesToClass = async () => {
+    if (!selectedClassForMapping || !schoolId) {
+      toast.error("Please select a class to map fee types."); return;
+    }
+    setIsMappingFeesToClass(true);
+    const toastId = toast.loading('Saving fee type mapping...');
+
+    try {
+      // Delete all existing mappings for this class
+      const { error: deleteError } = await supabase.from('fee_type_classes').delete().eq('class_id', selectedClassForMapping).eq('school_id', schoolId);
+      if (deleteError) throw deleteError;
+
+      // Insert new mappings
+      if (feeTypesForClassMapping.length > 0) {
+        const newMappings = feeTypesForClassMapping.map(feeTypeId => ({
+          class_id: selectedClassForMapping,
+          fee_type_id: feeTypeId,
+          school_id: schoolId,
+        }));
+        const { error: insertError } = await supabase.from('fee_type_classes').insert(newMappings);
+        if (insertError) throw insertError;
+      }
+
+      toast.success('Fee types mapped to class successfully!', { id: toastId });
+      setShowMapFeeTypesToClassModal(false);
+      setSelectedClassForMapping('');
+      setFeeTypesForClassMapping([]);
+      fetchFeeTypes(); // Refresh the main fee types list to show updated class assignments
+    } catch (error: any) {
+      console.error('Error mapping fee types to class:', error);
+      toast.error(`Failed to save mapping: ${error.message || 'Unknown error'}`, { id: toastId });
+    } finally {
+      setIsMappingFeesToClass(false);
+    }
+  };
+
 
   if (authLoading || isSchoolInfoLoading) {
     return <div className="p-6 text-center animate-pulse text-gray-500">Loading session and school information...</div>;
@@ -655,6 +789,11 @@ export default function FeeTypeManagement() {
   if (!schoolId) {
     return <div className="p-6 text-center text-red-500 bg-red-50 p-4 rounded-md">School information is not available. Please ensure your account is correctly set up. Fee & Class management features are disabled.</div>;
   }
+
+  const filteredFeeTypes = feeTypes.filter((fee) => {
+    const term = feeSearchTerm.toLowerCase();
+    return fee.name.toLowerCase().includes(term) || (fee.description?.toLowerCase() || '').includes(term);
+  });
 
   return (
     <div className="p-4 sm:p-6 bg-slate-100 min-h-screen">
@@ -669,6 +808,13 @@ export default function FeeTypeManagement() {
                 <CogIcon className="h-5 w-5 mr-2" /> Manage Classes
             </button>
             <button
+              onClick={() => setShowMapFeeTypesToClassModal(true)}
+              disabled={isPageLoading || isMappingFeesToClass || classes.length === 0}
+              className="flex items-center justify-center bg-blue-600 text-white px-4 py-2.5 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75 disabled:bg-gray-300 transition-colors w-full sm:w-auto"
+            >
+              <RectangleGroupIcon className="h-5 w-5 mr-2" /> Map Fees to Class
+            </button>
+            <button
               onClick={() => setShowCreateFeeModal(true)}
               disabled={isPageLoading || isSubmittingFee}
               className="flex items-center justify-center bg-indigo-600 text-white px-5 py-3 rounded-lg shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-75 disabled:bg-gray-300 transition-all duration-150 ease-in-out transform hover:scale-105 w-full sm:w-auto font-medium"
@@ -678,17 +824,27 @@ export default function FeeTypeManagement() {
         </div>
       </div>
 
-      {(isPageLoading || (isFeeTypesLoading && feeTypes.length === 0)) && schoolId && (
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="🔍 Search Fee Type by Name or Description..."
+          value={feeSearchTerm}
+          onChange={(e) => setFeeSearchTerm(e.target.value)}
+          className="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-indigo-500 transition-shadow"
+        />
+      </div>
+
+      {(isPageLoading || (isFeeTypesLoading && filteredFeeTypes.length === 0)) && schoolId && (
         <div className="text-center py-10 text-gray-500 animate-pulse">Loading fee types and classes...</div>
       )}
 
-      {!isPageLoading && !isFeeTypesLoading && feeTypes.length === 0 && schoolId && (
+      {!isPageLoading && !isFeeTypesLoading && filteredFeeTypes.length === 0 && schoolId && (
          <div className="text-center py-10 text-gray-500 bg-white p-6 rounded-xl shadow-lg">
-             No fee types found for this school. Create one to get started.
+             No fee types found matching your search criteria.
          </div>
       )}
 
-      {feeTypes.length > 0 && (
+      {filteredFeeTypes.length > 0 && (
         <div className="overflow-x-auto bg-white shadow-xl rounded-lg">
           <table className="w-full border-collapse min-w-[900px]">
             <thead className="bg-gray-100">
@@ -698,11 +854,12 @@ export default function FeeTypeManagement() {
                 <th className="p-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Amount (₹)</th>
                 <th className="p-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Applicable From</th>
                 <th className="p-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Classes</th>
+                <th className="p-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Status</th>
                 <th className="p-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {feeTypes.map((fee) => (
+              {filteredFeeTypes.map((fee) => (
                   <tr key={fee.id} className="hover:bg-slate-50 transition-colors">
                     <td className="p-3 whitespace-nowrap text-sm font-medium text-gray-900">{fee.name}</td>
                     <td className="p-3 text-sm text-gray-500 max-w-xs truncate" title={fee.description || undefined}>
@@ -735,7 +892,7 @@ export default function FeeTypeManagement() {
                       <button onClick={() => openEditFeeModal(fee)} disabled={isPageLoading || isSubmittingFee} className="text-indigo-600 hover:text-indigo-800 p-1 disabled:text-gray-400" title="Edit">
                         <PencilSquareIcon className="h-5 w-5"/>
                       </button>
-                      <button onClick={() => { setFeeTypeToAssign(fee); setShowAssignStudentsModal(true); }} disabled={isPageLoading || isSubmittingFee} className="text-blue-600 hover:text-blue-800 p-1 disabled:text-gray-400" title="Assign to Students">
+                      <button onClick={() => openAssignStudentsModal(fee)} disabled={isPageLoading || isSubmittingFee} className="text-blue-600 hover:text-blue-800 p-1 disabled:text-gray-400" title="Assign to Students">
                         <UsersIcon className="h-5 w-5"/>
                       </button>
                       <button onClick={() => deleteFeeType(fee)} disabled={isPageLoading || isSubmittingFee} className="text-red-600 hover:text-red-800 p-1 disabled:text-gray-400" title="Delete Fee Type">
@@ -795,176 +952,296 @@ export default function FeeTypeManagement() {
                 <Dialog.Panel className="w-full max-w-lg transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
                   <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 flex justify-between items-center">{modalProps.title}<button onClick={modalProps.reset} className="p-1 rounded-full hover:bg-gray-200"><XMarkIcon className="h-5 w-5 text-gray-500"/></button></Dialog.Title>
                   <form onSubmit={(e) => { e.preventDefault(); modalProps.submit(); }} className="mt-5 space-y-5">
-                    <div>
-                      <label htmlFor={`${idx}-fee-name`} className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
-                      <input id={`${idx}-fee-name`} name="name" value={modalProps.form.name} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
-                    </div>
-                    <div>
-                      <label htmlFor={`${idx}-fee-description`} className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                      <textarea id={`${idx}-fee-description`} name="description" value={modalProps.form.description} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} rows={4} className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
-                    </div>
-                    <div>
-                      <label htmlFor={`${idx}-fee-default_amount`} className="block text-sm font-medium text-gray-700 mb-1">Default Amount (₹)</label>
-                      <input id={`${idx}-fee-default_amount`} name="default_amount" value={modalProps.form.default_amount} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} type="number" step="0.01" placeholder="e.g., 500.00" className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
-                    </div>
-                    {/* Applicable From Toggle */}
-                    <div className="flex items-center justify-between mb-2">
-                        <label htmlFor={`${idx}-applicable-from-toggle`} className="block text-sm font-medium text-gray-700">Set specific &apos;Applicable From&apos; date?</label>
-                        <Switch
-                            checked={modalProps.applicableFromEnabled}
-                            onChange={modalProps.setApplicableFromEnabled}
-                            disabled={isSubmittingFee}
-                            className={`${modalProps.applicableFromEnabled ? 'bg-indigo-600' : 'bg-gray-200'}
-                            relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2`}
-                        >
-                            <span className="sr-only">Enable Applicable From Date</span>
-                            <span
-                            className={`${modalProps.applicableFromEnabled ? 'translate-x-5' : 'translate-x-0'}
-                                pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out`}
-                            />
-                        </Switch>
-                    </div>
-                    {modalProps.applicableFromEnabled && (
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Applicable From</label>
-                        <div className="grid grid-cols-3 gap-2 mt-1">
-                          <select name="applicableFrom_month" value={modalProps.form.applicableFrom_month} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
-                            {MONTH_NAMES.map((month, index) => <option key={index} value={String(index)}>{month}</option>)}
-                          </select>
-                          <select name="applicableFrom_day" value={modalProps.form.applicableFrom_day} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
-                            {dayOptions(parseInt(modalProps.form.applicableFrom_month), parseInt(modalProps.form.applicableFrom_year)).map(day => <option key={day} value={String(day)}>{day}</option>)}
-                          </select>
-                          <select name="applicableFrom_year" value={modalProps.form.applicableFrom_year} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
-                            {yearOptions.map(year => <option key={year} value={String(year)}>{year}</option>)}
-                          </select>
+                        <div>
+                          <label htmlFor={`${idx}-fee-name`} className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+                          <input id={`${idx}-fee-name`} name="name" value={modalProps.form.name} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
                         </div>
-                      </div>
-                    )}
-                    <fieldset className="border rounded-md p-3">
-                      <legend className="text-sm font-semibold px-1 text-gray-700">Assign to Classes</legend>
-                       <div className="my-1 flex space-x-2">
-                          <button type="button" onClick={() => handleSelectAllClasses(modalProps.setSelectedIds)} disabled={isSubmittingFee || classes.length === 0} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Select All</button>
-                          <button type="button" onClick={() => handleUnselectAllClasses(modalProps.setSelectedIds)} disabled={isSubmittingFee} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Unselect All</button>
+                        <div>
+                          <label htmlFor={`${idx}-fee-description`} className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                          <textarea id={`${idx}-fee-description`} name="description" value={modalProps.form.description} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} rows={4} className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
                         </div>
-                      <div className="space-y-1 max-h-40 overflow-y-auto border p-2 rounded-md bg-gray-50">
-                        {classes.length > 0 ? classes.map((cls) => (
-                          <label key={cls.id} className="flex items-center p-1.5 hover:bg-indigo-50 rounded cursor-pointer">
-                            <input type="checkbox" checked={modalProps.selectedIds.includes(cls.id)} onChange={() => handleCheckboxToggle(cls.id, modalProps.selectedIds, modalProps.setSelectedIds)} disabled={isSubmittingFee} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-offset-0 focus:ring-2 focus:ring-indigo-500 mr-2.5"/>
-                            <span className="text-sm text-gray-800">{cls.name}</span>
-                          </label>
-                        )) : <p className="text-xs text-gray-500 italic">No classes available. Add classes via &quot;Manage Classes&quot;.</p>}
-                      </div>
-                    </fieldset>
-                    <div className="mt-6 flex justify-end space-x-3">
-                      <button type="button" onClick={modalProps.reset} disabled={isSubmittingFee} className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200">Cancel</button>
-                      <button type="submit" disabled={isSubmittingFee} className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-300">
-                        {isSubmittingFee ? modalProps.submittingText : modalProps.submitText}
-                      </button>
-                    </div>
-                  </form>
-                </Dialog.Panel>
-              </Transition.Child></div></div>
-            </Dialog>
-          </Transition>
-        ))
-      )}
+                        <div>
+                          <label htmlFor={`${idx}-fee-default_amount`} className="block text-sm font-medium text-gray-700 mb-1">Default Amount (₹)</label>
+                          <input id={`${idx}-fee-default_amount`} name="default_amount" value={modalProps.form.default_amount} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} type="number" step="0.01" placeholder="e.g., 500.00" className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3"/>
+                        </div>
+                        {/* Applicable From Toggle */}
+                        <div className="flex items-center justify-between mb-2">
+                            <label htmlFor={`${idx}-applicable-from-toggle`} className="block text-sm font-medium text-gray-700">Set specific &apos;Applicable From&apos; date?</label>
+                            <Switch
+                                checked={modalProps.applicableFromEnabled}
+                                onChange={modalProps.setApplicableFromEnabled}
+                                disabled={isSubmittingFee}
+                                className={`${modalProps.applicableFromEnabled ? 'bg-indigo-600' : 'bg-gray-200'}
+                                relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2`}
+                            >
+                                <span className="sr-only">Enable Applicable From Date</span>
+                                <span
+                                className={`${modalProps.applicableFromEnabled ? 'translate-x-5' : 'translate-x-0'}
+                                    pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out`}
+                                />
+                            </Switch>
+                        </div>
+                        {modalProps.applicableFromEnabled && (
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Applicable From</label>
+                            <div className="grid grid-cols-3 gap-2 mt-1">
+                              <select name="applicableFrom_month" value={modalProps.form.applicableFrom_month} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
+                                {MONTH_NAMES.map((month, index) => <option key={index} value={String(index)}>{month}</option>)}
+                              </select>
+                              <select name="applicableFrom_day" value={modalProps.form.applicableFrom_day} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
+                                {dayOptions(parseInt(modalProps.form.applicableFrom_month), parseInt(modalProps.form.applicableFrom_year)).map(day => <option key={day} value={String(day)}>{day}</option>)}
+                              </select>
+                              <select name="applicableFrom_year" value={modalProps.form.applicableFrom_year} onChange={(e) => handleFormInputChange(e, modalProps.setForm)} disabled={isSubmittingFee} className="col-span-1 w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-3">
+                                {yearOptions.map(year => <option key={year} value={String(year)}>{year}</option>)}
+                              </select>
+                            </div>
+                          </div>
+                        )}
+                        <fieldset className="border rounded-md p-3">
+                          <legend className="text-sm font-semibold px-1 text-gray-700">Assign to Classes</legend>
+                           <div className="my-1 flex space-x-2">
+                              <button type="button" onClick={() => handleSelectAllClasses(modalProps.setSelectedIds)} disabled={isSubmittingFee || classes.length === 0} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Select All</button>
+                              <button type="button" onClick={() => handleUnselectAllClasses(modalProps.setSelectedIds)} disabled={isSubmittingFee} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Unselect All</button>
+                            </div>
+                          <div className="space-y-1 max-h-40 overflow-y-auto border p-2 rounded-md bg-gray-50">
+                            {classes.length > 0 ? classes.map((cls) => (
+                              <label key={cls.id} className="flex items-center p-1.5 hover:bg-indigo-50 rounded cursor-pointer">
+                                <input type="checkbox" checked={modalProps.selectedIds.includes(cls.id)} onChange={() => handleCheckboxToggle(cls.id, modalProps.selectedIds, modalProps.setSelectedIds)} disabled={isSubmittingFee} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-offset-0 focus:ring-2 focus:ring-indigo-500 mr-2.5"/>
+                                <span className="text-sm text-gray-800">{cls.name}</span>
+                              </label>
+                            )) : <p className="text-xs text-gray-500 italic">No classes available. Add classes via &quot;Manage Classes&quot;.</p>}
+                          </div>
+                        </fieldset>
+                        <div className="mt-6 flex justify-end space-x-3">
+                          <button type="button" onClick={modalProps.reset} disabled={isSubmittingFee} className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200">Cancel</button>
+                          <button type="submit" disabled={isSubmittingFee} className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-300">
+                            {isSubmittingFee ? modalProps.submittingText : modalProps.submitText}
+                          </button>
+                        </div>
+                      </form>
+                    </Dialog.Panel>
+                  </Transition.Child></div></div>
+                </Dialog>
+              </Transition>
+            ))
+          )}
 
-      {/* Assign Students Modal */}
-      <Transition appear show={showAssignStudentsModal} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={resetAssignStudentsModal}>
-          <Transition.Child
-            as={Fragment}
-            enter="ease-out duration-300"
-            enterFrom="opacity-0"
-            enterTo="opacity-100"
-            leave="ease-in duration-200"
-            leaveFrom="opacity-100"
-            leaveTo="opacity-0"
-          >
-            <div className="fixed inset-0 bg-black bg-opacity-40" />
-          </Transition.Child>
-
-          <div className="fixed inset-0 overflow-y-auto">
-            <div className="flex min-h-full items-center justify-center p-4 text-center">
+          {/* Assign Students Modal */}
+          <Transition appear show={showAssignStudentsModal} as={Fragment}>
+            <Dialog as="div" className="relative z-50" onClose={resetAssignStudentsModal}>
               <Transition.Child
                 as={Fragment}
                 enter="ease-out duration-300"
-                enterFrom="opacity-0 scale-95"
-                enterTo="opacity-100 scale-100"
+                enterFrom="opacity-0"
+                enterTo="opacity-100"
                 leave="ease-in duration-200"
-                leaveFrom="opacity-100 scale-100"
-                leaveTo="opacity-0 scale-95"
+                leaveFrom="opacity-100"
+                leaveTo="opacity-0"
               >
-                <Dialog.Panel className="w-full max-w-xl transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
-                  <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 flex justify-between items-center pb-4 border-b">
-                    Assign Fee: <span className="text-indigo-700 ml-2">{feeTypeToAssign?.name}</span>
-                    <button onClick={resetAssignStudentsModal} className="p-1 rounded-full hover:bg-gray-200">
-                      <XMarkIcon className="h-5 w-5 text-gray-500" />
+                <div className="fixed inset-0 bg-black bg-opacity-40" />
+              </Transition.Child>
+
+              <div className="fixed inset-0 overflow-y-auto">
+                <div className="flex min-h-full items-center justify-center p-4 text-center">
+                  <Transition.Child
+                    as={Fragment}
+                    enter="ease-out duration-300"
+                    enterFrom="opacity-0 scale-95"
+                    enterTo="opacity-100 scale-100"
+                    leave="ease-in duration-200"
+                    leaveFrom="opacity-100 scale-100"
+                    leaveTo="opacity-0 scale-95"
+                  >
+                    <Dialog.Panel className="w-full max-w-xl transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
+                      <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 flex justify-between items-center pb-4 border-b">
+                        Assign Fee: <span className="text-indigo-700 ml-2">{feeTypeToAssign?.name}</span>
+                        <button onClick={resetAssignStudentsModal} className="p-1 rounded-full hover:bg-gray-200">
+                          <XMarkIcon className="h-5 w-5 text-gray-500" />
+                        </button>
+                      </Dialog.Title>
+
+                      <div className="mt-5 space-y-6">
+                        <div>
+                          <label htmlFor="assign-class-select" className="block text-sm font-medium text-gray-700 mb-1">
+                            Select Class
+                          </label>
+                          <select
+                            id="assign-class-select"
+                            value={selectedClassForAssignment}
+                            onChange={(e) => setSelectedClassForAssignment(e.target.value)}
+                            disabled={isAssigningStudents}
+                            className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2.5 bg-white disabled:bg-gray-100"
+                          >
+                            <option value="">-- Choose a Class --</option>
+                            {/* Filter classes based on feeTypeToAssign.classes */}
+                            {filteredClassesForAssignStudents.map(cls => (
+                              <option key={cls.id} value={cls.id}>
+                                {cls.name}
+                              </option>
+                            ))}
+                          </select>
+                          {(filteredClassesForAssignStudents.length === 0 && feeTypeToAssign?.classes?.length === 0) && (
+                            <p className="text-sm text-gray-500 mt-2">This fee type is not applicable to any classes. Please edit the fee type to assign it to classes first.</p>
+                          )}
+                          {filteredClassesForAssignStudents.length === 0 && (feeTypeToAssign?.classes?.length || 0) > 0 && (
+                            <p className="text-sm text-gray-500 mt-2">No matching classes found.</p>
+                          )}
+                        </div>
+
+                        {selectedClassForAssignment && (
+                          <fieldset className="border rounded-md p-3 pb-0 space-y-3">
+                            <legend className="text-sm font-semibold px-1 text-gray-700">Students in {classes.find(c => c.id === selectedClassForAssignment)?.name}</legend>
+                            <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-200">
+                              <label className="flex items-center text-sm font-medium text-gray-700 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedStudentIdsToAssign.length === studentsInSelectedClass.length && studentsInSelectedClass.length > 0}
+                                  onChange={(e) => handleToggleSelectAllStudents(e.target.checked)}
+                                  disabled={isAssigningStudents || studentsInSelectedClass.length === 0}
+                                  className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 mr-2"
+                                />
+                                Select All Students
+                              </label>
+                              <span className="text-xs text-gray-500">({selectedStudentIdsToAssign.length} selected)</span>
+                            </div>
+
+                            {studentsInSelectedClass.length === 0 ? (
+                              <p className="text-sm text-gray-500 italic py-2">No students found in this class.</p>
+                            ) : (
+                              <div className="max-h-60 overflow-y-auto pr-2">
+                                {studentsInSelectedClass.map(student => (
+                                  <label key={student.id} className="flex flex-col items-start p-1.5 hover:bg-indigo-50 rounded cursor-pointer group">
+                                    <div className="flex items-center w-full">
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedStudentIdsToAssign.includes(student.id)}
+                                        onChange={() => handleToggleStudentSelection(student.id)}
+                                        disabled={isAssigningStudents}
+                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 mr-2.5"
+                                      />
+                                      <span className="text-sm text-gray-800 flex-grow">
+                                        {student.name} <span className="text-gray-500 text-xs">({student.roll_no})</span>
+                                      </span>
+                                      {selectedStudentIdsToAssign.includes(student.id) && (
+                                        <CheckIcon className="h-4 w-4 text-indigo-600 ml-2 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                      )}
+                                    </div>
+                                    {selectedStudentIdsToAssign.includes(student.id) && (
+                                      <div className="pl-6 space-y-1 mt-1 bg-gray-50 p-2 rounded-md border border-gray-200 w-full">
+                                        <div>
+                                          <label className="block text-xs font-medium text-gray-600">Discount (₹)</label>
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            placeholder="Optional Discount"
+                                            value={studentFeeAdjustments[student.id]?.discount || ''}
+                                            onChange={(e) => handleStudentDiscountChange(student.id, e.target.value)}
+                                            className="w-full p-1.5 border border-gray-300 rounded-md text-xs shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                            disabled={isAssigningStudents}
+                                          />
+                                        </div>
+                                        <div>
+                                          <label className="block text-xs font-medium text-gray-600">Description</label>
+                                          <input
+                                            type="text"
+                                            placeholder="Reason for discount (optional)"
+                                            value={studentFeeAdjustments[student.id]?.description || ''}
+                                            onChange={(e) => handleStudentDiscountDescChange(student.id, e.target.value)}
+                                            className="w-full p-1.5 border border-gray-300 rounded-md text-xs shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+                                            disabled={isAssigningStudents}
+                                          />
+                                        </div>
+                                      </div>
+                                    )}
+                                  </label>
+                                ))}
+                              </div>
+                            )}
+                          </fieldset>
+                        )}
+                      </div>
+
+                      <div className="mt-8 flex justify-end space-x-3">
+                        <button
+                          type="button"
+                          onClick={resetAssignStudentsModal}
+                          disabled={isAssigningStudents}
+                          className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleAssignStudentsToFee}
+                          disabled={isAssigningStudents || !selectedClassForAssignment || selectedStudentIdsToAssign.length === 0}
+                          className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-300"
+                        >
+                          {isAssigningStudents ? 'Assigning...' : 'Assign Fee'}
+                        </button>
+                      </div>
+                    </Dialog.Panel>
+                  </Transition.Child>
+                </div>
+              </div>
+            </Dialog>
+          </Transition>
+
+          {/* Map Fee Types to Class Modal */}
+          <Transition appear show={showMapFeeTypesToClassModal} as={Fragment}>
+            <Dialog as="div" className="relative z-50" onClose={() => { setShowMapFeeTypesToClassModal(false); setSelectedClassForMapping(''); setFeeTypesForClassMapping([]); }}>
+              <Transition.Child as={Fragment} enter="ease-out duration-300" enterFrom="opacity-0" enterTo="opacity-100" leave="ease-in duration-200" leaveFrom="opacity-100" leaveTo="opacity-0"><div className="fixed inset-0 bg-black bg-opacity-40" /></Transition.Child>
+              <div className="fixed inset-0 overflow-y-auto"><div className="flex min-h-full items-center justify-center p-4 text-center">
+              <Transition.Child as={Fragment} enter="ease-out duration-300" enterFrom="opacity-0 scale-95" enterTo="opacity-100 scale-100" leave="ease-in duration-200" leaveFrom="opacity-100 scale-100" leaveTo="opacity-0 scale-95">
+                <Dialog.Panel className="w-full max-w-lg transform overflow-hidden rounded-2xl bg-white p-6 text-left align-middle shadow-xl transition-all">
+                  <Dialog.Title as="h3" className="text-xl font-semibold leading-6 text-gray-900 flex justify-between items-center">
+                    Map Fee Types to Class
+                    <button onClick={() => { setShowMapFeeTypesToClassModal(false); setSelectedClassForMapping(''); setFeeTypesForClassMapping([]); }} className="p-1 rounded-full hover:bg-gray-200">
+                      <XMarkIcon className="h-5 w-5 text-gray-500"/>
                     </button>
                   </Dialog.Title>
 
                   <div className="mt-5 space-y-6">
                     <div>
-                      <label htmlFor="assign-class-select" className="block text-sm font-medium text-gray-700 mb-1">
-                        Select Class
-                      </label>
+                      <label htmlFor="map-class-select" className="block text-sm font-medium text-gray-700 mb-1">Select Class:</label>
                       <select
-                        id="assign-class-select"
-                        value={selectedClassForAssignment}
-                        onChange={(e) => setSelectedClassForAssignment(e.target.value)}
-                        disabled={isAssigningStudents}
+                        id="map-class-select"
+                        value={selectedClassForMapping}
+                        onChange={(e) => setSelectedClassForMapping(e.target.value)}
+                        disabled={isMappingFeesToClass || classes.length === 0}
                         className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2.5 bg-white disabled:bg-gray-100"
                       >
                         <option value="">-- Choose a Class --</option>
-                        {/* Filter classes based on feeTypeToAssign.classes */}
-                        {filteredClassesForAssignStudents.map(cls => (
+                        {classes.map(cls => (
                           <option key={cls.id} value={cls.id}>
                             {cls.name}
                           </option>
                         ))}
                       </select>
-                      {(filteredClassesForAssignStudents.length === 0 && feeTypeToAssign?.classes?.length === 0) && (
-                        <p className="text-sm text-gray-500 mt-2">This fee type is not applicable to any classes. Please edit the fee type to assign it to classes first.</p>
-                      )}
-                      {filteredClassesForAssignStudents.length === 0 && (feeTypeToAssign?.classes?.length || 0) > 0 && (
-                        <p className="text-sm text-gray-500 mt-2">No matching classes found.</p>
-                      )}
+                      {classes.length === 0 && !isPageLoading && <p className="text-xs text-red-500 mt-1">No classes configured for this school. Add classes via &quot;Manage Classes&quot; first.</p>}
                     </div>
 
-                    {selectedClassForAssignment && (
+                    {selectedClassForMapping && (
                       <fieldset className="border rounded-md p-3 pb-0 space-y-3">
-                        <legend className="text-sm font-semibold px-1 text-gray-700">Students in {classes.find(c => c.id === selectedClassForAssignment)?.name}</legend>
-                        <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-200">
-                          <label className="flex items-center text-sm font-medium text-gray-700 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={selectedStudentIdsToAssign.length === studentsInSelectedClass.length && studentsInSelectedClass.length > 0}
-                              onChange={(e) => handleToggleSelectAllStudents(e.target.checked)}
-                              disabled={isAssigningStudents || studentsInSelectedClass.length === 0}
-                              className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 mr-2"
-                            />
-                            Select All Students
-                          </label>
-                          <span className="text-xs text-gray-500">({selectedStudentIdsToAssign.length} selected)</span>
+                        <legend className="text-sm font-semibold px-1 text-gray-700">Assign Fee Types to {classes.find(c => c.id === selectedClassForMapping)?.name}</legend>
+                        <div className="my-1 flex space-x-2">
+                          <button type="button" onClick={() => setFeeTypesForClassMapping(feeTypes.map(ft => ft.id))} disabled={isMappingFeesToClass || feeTypes.length === 0} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Select All</button>
+                          <button type="button" onClick={() => setFeeTypesForClassMapping([])} disabled={isMappingFeesToClass} className="text-xs text-indigo-600 hover:underline disabled:text-gray-400">Unselect All</button>
                         </div>
-
-                        {studentsInSelectedClass.length === 0 ? (
-                          <p className="text-sm text-gray-500 italic py-2">No students found in this class.</p>
+                        {feeTypes.length === 0 ? (
+                          <p className="text-sm text-gray-500 italic py-2">No fee types found for this school.</p>
                         ) : (
                           <div className="max-h-60 overflow-y-auto pr-2">
-                            {studentsInSelectedClass.map(student => (
-                              <label key={student.id} className="flex items-center p-1.5 hover:bg-indigo-50 rounded cursor-pointer group">
+                            {feeTypes.map(fee => (
+                              <label key={fee.id} className="flex items-center p-1.5 hover:bg-indigo-50 rounded cursor-pointer group">
                                 <input
                                   type="checkbox"
-                                  checked={selectedStudentIdsToAssign.includes(student.id)}
-                                  onChange={() => handleToggleStudentSelection(student.id)}
-                                  disabled={isAssigningStudents}
+                                  checked={feeTypesForClassMapping.includes(fee.id)}
+                                  onChange={() => setFeeTypesForClassMapping(prev => prev.includes(fee.id) ? prev.filter(id => id !== fee.id) : [...prev, fee.id])}
+                                  disabled={isMappingFeesToClass}
                                   className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 mr-2.5"
                                 />
-                                <span className="text-sm text-gray-800 flex-grow">
-                                  {student.name} <span className="text-gray-500 text-xs">({student.roll_no})</span>
-                                </span>
-                                {selectedStudentIdsToAssign.includes(student.id) && (
+                                <span className="text-sm text-gray-800 flex-grow">{fee.name}</span>
+                                {feeTypesForClassMapping.includes(fee.id) && (
                                   <CheckIcon className="h-4 w-4 text-indigo-600 ml-2 opacity-0 group-hover:opacity-100 transition-opacity" />
                                 )}
                               </label>
@@ -978,19 +1255,19 @@ export default function FeeTypeManagement() {
                   <div className="mt-8 flex justify-end space-x-3">
                     <button
                       type="button"
-                      onClick={resetAssignStudentsModal}
-                      disabled={isAssigningStudents}
+                      onClick={() => { setShowMapFeeTypesToClassModal(false); setSelectedClassForMapping(''); setFeeTypesForClassMapping([]); }}
+                      disabled={isMappingFeesToClass}
                       className="px-5 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200"
                     >
                       Cancel
                     </button>
                     <button
                       type="button"
-                      onClick={handleAssignStudentsToFee}
-                      disabled={isAssigningStudents || !selectedClassForAssignment || selectedStudentIdsToAssign.length === 0}
-                      className="px-5 py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-300"
+                      onClick={handleMapFeeTypesToClass}
+                      disabled={isMappingFeesToClass || !selectedClassForMapping}
+                      className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-blue-300"
                     >
-                      {isAssigningStudents ? 'Assigning...' : 'Assign Fee'}
+                      {isMappingFeesToClass ? 'Mapping...' : 'Save Mapping'}
                     </button>
                   </div>
                 </Dialog.Panel>
