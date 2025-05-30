@@ -1,4 +1,4 @@
-// app/dashboard/collections/page.tsx
+// sfms/app/dashboard/collections/page.tsx
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -9,7 +9,7 @@ import { useAuth } from '@/components/AuthContext';
 import { useRouter } from 'next/navigation';
 import {
   CalendarDaysIcon,
-  CurrencyDollarIcon, // Keep for potential use, but won't hardcode '$'
+  CurrencyDollarIcon,
   ChartBarIcon,
   RectangleGroupIcon,
   CalculatorIcon,
@@ -78,11 +78,17 @@ export default function CollectionsPage() {
         endDate = selectedDate;
         break;
       case 'weekly':
-        const selectedDay = new Date(selectedDate);
-        const dayOfWeek = selectedDay.getDay(); // 0 (Sunday) to 6 (Saturday)
-        const diff = selectedDay.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1); // adjust to Monday of current week
-        startDate = new Date(selectedDay.setDate(diff)).toISOString().split('T')[0];
-        endDate = new Date(selectedDay.setDate(selectedDay.getDate() + 6)).toISOString().split('T')[0];
+        const day = new Date(selectedDate);
+        const dayOfWeek = day.getDay(); // 0 (Sunday) to 6 (Saturday)
+        const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+        
+        const monday = new Date(day);
+        monday.setDate(day.getDate() + mondayOffset);
+        startDate = monday.toISOString().split('T')[0];
+
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        endDate = sunday.toISOString().split('T')[0];
         break;
       case 'monthly':
         startDate = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-01`;
@@ -319,6 +325,7 @@ export default function CollectionsPage() {
                     <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Date</th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Student Name</th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Class</th>
+                    <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Roll No.</th>
                     <th scope="col" className="px-6 py-3 text-right text-xs font-bold text-gray-600 uppercase tracking-wider">Amount (₹)</th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Mode</th>
                     <th scope="col" className="px-6 py-3 text-left text-xs font-bold text-gray-600 uppercase tracking-wider">Receipt #</th>
@@ -337,8 +344,11 @@ export default function CollectionsPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
                         {payment.students?.classes?.name || 'N/A'}
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                        {payment.students?.roll_no || 'N/A'}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-800 text-right font-semibold">
-                        ₹{payment.amount_paid.toFixed(2)}
+                        {payment.amount_paid.toFixed(2)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 capitalize">
                         {payment.mode_of_payment.replace(/_/g, ' ')}
